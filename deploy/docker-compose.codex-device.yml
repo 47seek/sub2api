@@ -1,0 +1,7 @@
+services:
+  sub2api:
+    image: ${CODEX_DEVICE_IMAGE:?Set CODEX_DEVICE_IMAGE to the loaded custom image}
+    pull_policy: never
+    environment:
+      GATEWAY_DISABLE_CODEX_IDENTITY_ENFORCEMENT: "false"
+      GATEWAY_OPENAI_WS_FORCE_HTTP: "true"
