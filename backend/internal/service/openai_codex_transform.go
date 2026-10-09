@@ -93,7 +93,7 @@ type codexOAuthTransformOptions struct {
 	SkipDefaultInstructions             bool
 	PreserveToolCallIDs                 bool
 	OmitPromotedSystemMessagesFromInput bool
-	// ResponsesLite selects where an injected hosted tool is declared.
+	// ResponsesLite preserves Lite item IDs and tool declarations.
 	ResponsesLite bool
 }
 
@@ -155,7 +155,6 @@ var openAIChatGPTInternalUnsupportedFields = []string{
 	"metadata",
 	"prompt_cache_retention",
 	"safety_identifier",
-	"stream_options",
 	"truncation",
 	"stop_sequences",
 }
@@ -328,6 +327,7 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 		input = filterCodexInputWithOptions(input, codexInputFilterOptions{
 			PreserveReferences: needsToolContinuation,
 			PreserveCallIDs:    opts.PreserveToolCallIDs,
+			ResponsesLite:      opts.ResponsesLite,
 		})
 		reqBody["input"] = input
 		result.Modified = true
@@ -1529,6 +1529,7 @@ func isInstructionsEmpty(reqBody map[string]any) bool {
 type codexInputFilterOptions struct {
 	PreserveReferences bool
 	PreserveCallIDs    bool
+	ResponsesLite      bool
 }
 
 // filterCodexInput 按需过滤 item_reference 与 id。
@@ -1575,7 +1576,7 @@ func codexItemReferenceIDMappings(input []any, preserveCallIDs bool) map[string]
 	return mappings
 }
 
-func codexInputItemIDs(input []any) map[string]struct{} {
+func codexInputItemIDs(input []any, responsesLite bool) map[string]struct{} {
 	itemIDs := make(map[string]struct{})
 	for _, rawItem := range input {
 		item, ok := rawItem.(map[string]any)
@@ -1584,7 +1585,7 @@ func codexInputItemIDs(input []any) map[string]struct{} {
 		}
 		itemType := strings.TrimSpace(firstNonEmptyString(item["type"]))
 		id := strings.TrimSpace(firstNonEmptyString(item["id"]))
-		if id != "" && !shouldStripOpenAIResponsesInputItemID(itemType, id) {
+		if id != "" && !shouldStripOpenAIResponsesInputItemID(itemType, id, responsesLite) {
 			itemIDs[id] = struct{}{}
 		}
 	}
@@ -1608,7 +1609,7 @@ func codexInputCallIDs(input []any) map[string]struct{} {
 func filterCodexInputWithOptions(input []any, opts codexInputFilterOptions) []any {
 	filtered := make([]any, 0, len(input))
 	referenceIDMappings := codexItemReferenceIDMappings(input, opts.PreserveCallIDs)
-	inputItemIDs := codexInputItemIDs(input)
+	inputItemIDs := codexInputItemIDs(input, opts.ResponsesLite)
 	inputCallIDs := codexInputCallIDs(input)
 	for _, item := range input {
 		m, ok := item.(map[string]any)
@@ -1744,7 +1745,7 @@ func filterCodexInputWithOptions(input []any, opts codexInputFilterOptions) []an
 		if !opts.PreserveReferences {
 			ensureCopy()
 			delete(newItem, "id")
-		} else if id, ok := m["id"].(string); ok && shouldStripOpenAIResponsesInputItemID(typ, id) {
+		} else if id, ok := m["id"].(string); ok && shouldStripOpenAIResponsesInputItemID(typ, id, opts.ResponsesLite) {
 			ensureCopy()
 			delete(newItem, "id")
 		}

@@ -36,6 +36,9 @@ func (s *OpenAIGatewayService) prepareCodexAccountIdentitySource(ctx context.Con
 }
 
 func codexAccountIdentitySource(c *gin.Context, fallback *Account) *Account {
+	if fallback != nil && fallback.GetCodexFingerprintMode() == codexFingerprintDevice {
+		return fallback
+	}
 	if c != nil {
 		if staged, ok := c.Get(codexAccountIdentitySourceContextKey); ok {
 			if source, ok := staged.(*Account); ok && source != nil {
@@ -56,6 +59,9 @@ func codexAccountIdentityNamespace(account *Account) string {
 	if account == nil || !account.IsOpenAIOAuthLike() {
 		return ""
 	}
+	if account.GetCodexFingerprintMode() == codexFingerprintDevice {
+		return ""
+	}
 	if upstreamAccountID := strings.TrimSpace(account.GetChatGPTAccountID()); upstreamAccountID != "" {
 		if upstreamUserID := strings.TrimSpace(account.GetCredential("chatgpt_user_id")); upstreamUserID != "" {
 			return "chatgpt:" + upstreamAccountID + ":user:" + upstreamUserID
@@ -74,10 +80,11 @@ func codexAccountIdentityNamespace(account *Account) string {
 	return ""
 }
 
-// isolateOpenAIUpstreamSessionID preserves the existing API-key isolation while
-// adding the selected OAuth credential namespace. A scheduler failover therefore
-// cannot send the same session/conversation identity through two upstream accounts.
+// Device mode keeps native references; other modes retain upstream namespacing.
 func isolateOpenAIUpstreamSessionID(apiKeyID int64, account *Account, raw string) string {
+	if account != nil && account.GetCodexFingerprintMode() == codexFingerprintDevice {
+		return raw
+	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
@@ -121,6 +128,21 @@ var codexAccountIdentityFields = []struct {
 	{name: "window_id", kind: "window"},
 	{name: "x-codex-window-id", kind: "window"},
 	{name: "x-client-request-id", kind: "request"},
+}
+
+func alignCodexInstallationAliases(values, identity map[string]any) bool {
+	installation, ok := identity["installation_id"]
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, name := range []string{"installation_id", "x-codex-installation-id"} {
+		if raw, exists := values[name]; exists && raw != installation {
+			values[name] = installation
+			changed = true
+		}
+	}
+	return changed
 }
 
 func applyCodexAccountIdentityFields(values map[string]any, account *Account, apiKeyID int64) bool {
@@ -271,5 +293,23 @@ func applyCodexAccountIdentityHeaders(headers http.Header, account *Account, api
 				headers.Set(openAIWSTurnMetadataHeader, string(rebuilt))
 			}
 		}
+	}
+}
+
+// Native session and cache references already form a coherent graph. Device
+// mode changes installation identity only; it must not invent session aliases.
+func applyCodexResponsesIdentityHeaders(c *gin.Context, account *Account, headers http.Header) {
+	if account == nil || !account.IsOpenAIOAuthLike() || account.GetCodexFingerprintMode() != codexFingerprintDevice || c == nil || c.Request == nil {
+		return
+	}
+	for _, name := range []string{"session-id", "thread-id", "x-client-request-id", "x-codex-window-id", "x-codex-parent-thread-id"} {
+		if value := c.GetHeader(name); value != "" {
+			headers.Set(name, value)
+		} else {
+			headers.Del(name)
+		}
+	}
+	for _, name := range []string{"session_id", "conversation_id", "x-codex-installation-id", "OpenAI-Beta"} {
+		headers.Del(name)
 	}
 }

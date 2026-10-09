@@ -146,7 +146,7 @@ func isExplicitOpenAIModelAvailabilityMessage(value string) bool {
 	return false
 }
 
-func openAICompactFallbackErrorResponse(resp *http.Response, signal *openAICompactFallbackSignal) (*http.Response, []byte) {
+func openAIStreamErrorResponse(resp *http.Response, payload []byte) (*http.Response, []byte) {
 	headers := make(http.Header)
 	if resp != nil {
 		headers = resp.Header.Clone()
@@ -154,7 +154,7 @@ func openAICompactFallbackErrorResponse(resp *http.Response, signal *openAICompa
 	if headers.Get("Content-Type") == "" {
 		headers.Set("Content-Type", "application/json")
 	}
-	payload := normalizeOpenAICompactFallbackHTTPErrorPayload(signal)
+	payload = normalizeOpenAIStreamHTTPErrorPayload(payload)
 	return &http.Response{
 		StatusCode: http.StatusBadRequest,
 		Header:     headers,
@@ -162,11 +162,7 @@ func openAICompactFallbackErrorResponse(resp *http.Response, signal *openAICompa
 	}, payload
 }
 
-func normalizeOpenAICompactFallbackHTTPErrorPayload(signal *openAICompactFallbackSignal) []byte {
-	if signal == nil {
-		return nil
-	}
-	payload := append([]byte(nil), signal.payload...)
+func normalizeOpenAIStreamHTTPErrorPayload(payload []byte) []byte {
 	var terminal struct {
 		Error    json.RawMessage `json:"error"`
 		Response struct {
@@ -175,6 +171,14 @@ func normalizeOpenAICompactFallbackHTTPErrorPayload(signal *openAICompactFallbac
 	}
 	if json.Unmarshal(payload, &terminal) != nil || len(bytes.TrimSpace(terminal.Response.Error)) == 0 ||
 		bytes.Equal(bytes.TrimSpace(terminal.Response.Error), []byte("null")) {
+		if gjson.GetBytes(payload, "type").String() == "error" && gjson.GetBytes(payload, "code").Exists() && len(terminal.Error) == 0 {
+			normalized, err := json.Marshal(struct {
+				Error json.RawMessage `json:"error"`
+			}{Error: payload})
+			if err == nil {
+				return normalized
+			}
+		}
 		return payload
 	}
 	// Standard HTTP error handlers consume error.message/type/code. A streamed

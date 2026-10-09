@@ -205,7 +205,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			reqModel, reqStream, promptCacheKey = requestView.Model, requestView.Stream, requestView.PromptCacheKey
 			originalModel = reqModel
 		}
-		sanitizedBody, changed, sanitizeErr := sanitizeOpenAIResponsesInputItemIDs(body)
+		sanitizedBody, changed, sanitizeErr := sanitizeOpenAIResponsesInputItemIDs(body, responsesLite)
 		if sanitizeErr != nil {
 			return nil, fmt.Errorf("sanitize OpenAI Responses input item IDs: %w", sanitizeErr)
 		}
@@ -380,7 +380,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 	instructions := gjson.GetBytes(body, "instructions")
 	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
-	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses {
+	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses && !(isCodexCLI && account.GetCodexFingerprintMode() == codexFingerprintDevice) {
 		markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
 	}
 	if billingModel != requestedModel {
@@ -516,6 +516,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
 				IsCodexCLI:                          isCodexCLI,
 				IsCompact:                           isCompactRequest,
+				SkipDefaultInstructions:             isCodexCLI && account.GetCodexFingerprintMode() == codexFingerprintDevice,
+				PreserveToolCallIDs:                 isCodexCLI && account.GetCodexFingerprintMode() == codexFingerprintDevice,
 				OmitPromotedSystemMessagesFromInput: omitPromotedSystemMessages,
 				ResponsesLite:                       responsesLite,
 			})
@@ -743,7 +745,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	lineageEntryBody := body
 	lineageSessionHash := ""
 	if stateStore := s.getOpenAIWSStateStore(); stateStore != nil && stateStore.HasAnySessionInvalidEncryptedContent() {
-		lineageSessionHash = s.GenerateSessionHash(c, body)
+		lineageSessionHash = s.openAIHTTPEncryptedLineageKey(c, account, body)
 		if invalidDigests := stateStore.GetSessionInvalidEncryptedContentDigests(lineageGroupID, lineageSessionHash); len(invalidDigests) > 0 {
 			strippedBody, strippedCount := s.stripSessionInvalidEncryptedContentLogged(
 				body, invalidDigests, "invalid_encrypted_lineage_strip", account.ID, 0,
@@ -857,7 +859,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			if len(invalidDigests) > 0 {
 				if lineageSessionHash == "" {
-					lineageSessionHash = s.GenerateSessionHash(c, lineageEntryBody)
+					lineageSessionHash = s.openAIHTTPEncryptedLineageKey(c, account, lineageEntryBody)
 				}
 				s.markOpenAIWSInvalidEncryptedContentLineage(lineageGroupID, lineageSessionHash, invalidDigests)
 			}
@@ -1033,6 +1035,47 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	compactModelFallbackRetried := false
 	agentTaskRecoveryTried := false
 	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, body)
+	recoverHTTPInvalidEncryptedContent := func(allowRetry bool) (bool, error) {
+		invalidDigests := collectOpenAIEncryptedContentDigestsRaw(body)
+		if len(invalidDigests) > 0 {
+			if lineageSessionHash == "" {
+				lineageSessionHash = s.openAIHTTPEncryptedLineageKey(c, account, lineageEntryBody)
+			}
+			s.markOpenAIWSInvalidEncryptedContentLineage(lineageGroupID, lineageSessionHash, invalidDigests)
+		}
+		if !allowRetry || httpInvalidEncryptedContentRetryTried {
+			return false, nil
+		}
+		decoded, decodeErr := ensureReqBody()
+		if decodeErr != nil {
+			return false, decodeErr
+		}
+		if !trimOpenAIEncryptedReasoningItems(decoded) {
+			return false, nil
+		}
+		next, err := marshalOpenAIUpstreamJSON(decoded)
+		if err != nil {
+			return false, fmt.Errorf("serialize invalid_encrypted_content retry body: %w", err)
+		}
+		body = next
+		requestView = newOpenAIRequestView(body)
+		httpInvalidEncryptedContentRetryTried = true
+		rejectedFieldRetryState.remember(body)
+		logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Retrying HTTP request once after invalid_encrypted_content (account: %s)", account.Name)
+		return true, nil
+	}
+	finishHTTPInvalidEncryptedContent := func(resp *http.Response, signal *openAIInvalidEncryptedContentSignal) (*OpenAIForwardResult, error) {
+		if c.Writer.Written() {
+			s.recordOpenAIStreamUpstreamError(c, account, false, resp.Header.Get("x-request-id"), "stream_failed", signal.payload, signal.message)
+			_, _ = c.Writer.WriteString(buildOpenAIResponseFailedSSE("", originalModel, normalizeOpenAIStreamHTTPErrorPayload(signal.payload), signal.message))
+			c.Writer.Flush()
+			MarkResponseCommitted(c)
+			return nil, signal
+		}
+		errorResp, _ := openAIStreamErrorResponse(resp, signal.payload)
+		c.Header("Content-Type", "application/json; charset=utf-8")
+		return s.handleErrorResponse(ctx, errorResp, c, account, body, resolveOpenAIErrorSchedulingModel(billingModel, upstreamModel))
+	}
 	for {
 		// Build upstream request
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
@@ -1052,6 +1095,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			return nil, err
 		}
+
+		applyCodexResponsesIdentityHeaders(c, account, upstreamReq.Header)
 
 		// Get proxy URL
 		proxyURL := ""
@@ -1109,34 +1154,15 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			respBody = s.redactAgentIdentitySensitiveBody(ctx, account, respBody)
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))
-			invalidEncryptedContentError := upstreamCode == "invalid_encrypted_content" ||
-				(upstreamCode == "thinking_signature_invalid" &&
-					strings.Contains(upstreamMsg, "The encrypted content") &&
-					strings.Contains(upstreamMsg, "could not be verified") &&
-					strings.Contains(upstreamMsg, "could not be decrypted or parsed"))
-			if !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && invalidEncryptedContentError {
-				decoded, decodeErr := ensureReqBody()
-				if decodeErr != nil {
-					return nil, decodeErr
-				}
-				invalidDigests := collectOpenAIEncryptedContentDigestsRaw(lineageEntryBody)
-				if trimOpenAIEncryptedReasoningItems(decoded) {
-					body, err = marshalOpenAIUpstreamJSON(decoded)
-					if err != nil {
-						return nil, fmt.Errorf("serialize invalid_encrypted_content retry body: %w", err)
-					}
-					if len(invalidDigests) > 0 {
-						if lineageSessionHash == "" {
-							lineageSessionHash = s.GenerateSessionHash(c, lineageEntryBody)
-						}
-						s.markOpenAIWSInvalidEncryptedContentLineage(lineageGroupID, lineageSessionHash, invalidDigests)
-					}
-					httpInvalidEncryptedContentRetryTried = true
-					rejectedFieldRetryState.remember(body)
-					logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Retrying non-WSv2 request once after invalid_encrypted_content (account: %s)", account.Name)
+			if resp.StatusCode == http.StatusBadRequest && isOpenAIInvalidEncryptedContentError(respBody, upstreamMsg) {
+				if retry, recoveryErr := recoverHTTPInvalidEncryptedContent(true); recoveryErr != nil {
+					return nil, recoveryErr
+				} else if retry {
 					continue
 				}
-				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Skip non-WSv2 invalid_encrypted_content retry because encrypted reasoning items are missing (account: %s)", account.Name)
+				if signal := newOpenAIInvalidEncryptedContentSignal(account, respBody, upstreamMsg); signal != nil {
+					return finishHTTPInvalidEncryptedContent(resp, signal)
+				}
 			}
 			if retryBody, reason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(resp.StatusCode, body, respBody); retryErr != nil {
 				return nil, fmt.Errorf("normalize rejected Responses field retry body: %w", retryErr)
@@ -1224,6 +1250,18 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		if reqStream {
 			streamResult, err := s.handleStreamingResponseWithReasoning(ctx, resp, c, account, startTime, originalModel, upstreamModel, reasoningEffortValue)
 			if err != nil {
+				if streamResult != nil && streamResult.invalidEncryptedContent != nil {
+					canRetry := !openAIStreamClientOutputStarted(c, false)
+					if retry, recoveryErr := recoverHTTPInvalidEncryptedContent(canRetry); recoveryErr != nil {
+						return nil, recoveryErr
+					} else if retry {
+						_ = resp.Body.Close()
+						continue
+					}
+					if canRetry {
+						return finishHTTPInvalidEncryptedContent(resp, streamResult.invalidEncryptedContent)
+					}
+				}
 				if signal, ok := asOpenAICompactFallbackSignal(err); ok {
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,
@@ -1239,7 +1277,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					if resp.Body != nil {
 						_ = resp.Body.Close()
 					}
-					compactResp, compactBody := openAICompactFallbackErrorResponse(resp, signal)
+					compactResp, compactBody := openAIStreamErrorResponse(resp, signal.payload)
 					if s.shouldFailoverOpenAIUpstreamResponse(account, compactResp.StatusCode, signal.message, compactBody) {
 						appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 							ProxyID:            opsUpstreamProxyID(account),
@@ -1271,6 +1309,15 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		} else {
 			nonStreamResult, err := s.handleNonStreamingResponse(ctx, resp, c, account, originalModel, upstreamModel)
 			if err != nil {
+				if signal, ok := err.(*openAIInvalidEncryptedContentSignal); ok {
+					if retry, recoveryErr := recoverHTTPInvalidEncryptedContent(true); recoveryErr != nil {
+						return nil, recoveryErr
+					} else if retry {
+						_ = resp.Body.Close()
+						continue
+					}
+					return finishHTTPInvalidEncryptedContent(resp, signal)
+				}
 				if signal, ok := asOpenAICompactFallbackSignal(err); ok {
 					if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 						c, account, requestedModel, body, http.StatusBadRequest, signal.message, signal.payload, compactModelFallbackRetried,
@@ -1536,6 +1583,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 // ForceCodexCLI 语义是「强制使用 Codex CLI 身份」，等价于使用网关规范身份，故返回空串；
 // 该优先级与历史行为一致（ForceCodexCLI 在账号自定义 UA 之后生效）。
 func (s *OpenAIGatewayService) codexIdentityOverrideUA(account *Account) string {
+	if account != nil && account.IsOpenAIOAuthLike() && account.GetCodexFingerprintMode() == codexFingerprintDevice {
+		return ""
+	}
 	if s != nil && s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
 		return ""
 	}

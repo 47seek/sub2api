@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +24,49 @@ const openAIWSFallbackReasonInvalidEncryptedContent = "invalid_encrypted_content
 // openAIWSIngressSessionHashContextKey 在 gin context 中携带 ingress 会话哈希，
 // 供 HTTP bridge turn 内的 lineage 记录复用同一会话键。
 const openAIWSIngressSessionHashContextKey = "openai_ws_ingress_session_hash"
+
+type openAIInvalidEncryptedContentSignal struct {
+	payload []byte
+	message string
+}
+
+func (e *openAIInvalidEncryptedContentSignal) Error() string { return e.message }
+
+func isOpenAIInvalidEncryptedContentError(payload []byte, message string) bool {
+	code := extractUpstreamErrorCode(payload)
+	if code == "" {
+		code = gjson.GetBytes(payload, "response.error.code").String()
+	}
+	if code == "" {
+		code = gjson.GetBytes(payload, "code").String()
+	}
+	return code == "invalid_encrypted_content" || (code == "thinking_signature_invalid" &&
+		strings.Contains(message, "The encrypted content") &&
+		strings.Contains(message, "could not be verified") &&
+		strings.Contains(message, "could not be decrypted or parsed"))
+}
+
+func newOpenAIInvalidEncryptedContentSignal(account *Account, payload []byte, message string) *openAIInvalidEncryptedContentSignal {
+	if !account.IsOpenAIOAuthLike() || account.GetCodexFingerprintMode() != codexFingerprintDevice ||
+		!isOpenAIInvalidEncryptedContentError(payload, message) {
+		return nil
+	}
+	return &openAIInvalidEncryptedContentSignal{payload: append([]byte(nil), payload...), message: message}
+}
+
+// A rejection is specific to the selected device row and stable OAuth owner.
+// Missing owner metadata permits an immediate retry but cannot poison history.
+func (s *OpenAIGatewayService) openAIHTTPEncryptedLineageKey(c *gin.Context, account *Account, body []byte) string {
+	session := s.GenerateSessionHash(c, body)
+	if account.GetCodexFingerprintMode() != codexFingerprintDevice {
+		return session
+	}
+	owner := openAICodexTurnStateAuthOwner(c, account)
+	if owner == "" || session == "" {
+		return ""
+	}
+	return openAIEncryptedContentDigest(fmt.Sprintf("http:%d:%s:%s", account.ID, owner, session))
+}
 
 func openAIEncryptedContentDigest(encrypted string) string {
 	sum := sha256.Sum256([]byte(encrypted))

@@ -22,7 +22,9 @@ func TestLargeNativeResponsesRemainsByteIdentical(t *testing.T) {
 	body := largeNativeResponsesBody(2 << 20)
 	for _, fn := range []func([]byte) ([]byte, bool, error){
 		normalizeOpenAIResponsesLegacyIngress,
-		sanitizeOpenAIResponsesInputItemIDs,
+		func(body []byte) ([]byte, bool, error) {
+			return sanitizeOpenAIResponsesInputItemIDs(body, false)
+		},
 		normalizeOpenAIResponsesReasoningContentReplay,
 		func(body []byte) ([]byte, bool, error) {
 			return normalizeOpenAIAPIKeyStoreFalseReasoningReplay(body, false)
@@ -40,7 +42,7 @@ func TestRawInputRewritePreservesImagesAndSurroundingFields(t *testing.T) {
 	body = bytes.Replace(body, []byte(`"id":"fc_valid"`), []byte(`"id":"bad"`), 1)
 	body = append(body[:len(body)-1], []byte(`,"opaque":9007199254740993}`)...)
 	image := gjson.GetBytes(body, "input.0.output.0.image_url").String()
-	out, changed, err := sanitizeOpenAIResponsesInputItemIDs(body)
+	out, changed, err := sanitizeOpenAIResponsesInputItemIDs(body, false)
 	require.NoError(t, err)
 	require.True(t, changed)
 	require.True(t, gjson.ValidBytes(out))
@@ -94,7 +96,9 @@ func BenchmarkOpenAILargeNativeRequest(b *testing.B) {
 		fn   func([]byte) ([]byte, bool, error)
 	}{
 		{"legacy_ingress", normalizeOpenAIResponsesLegacyIngress},
-		{"input_ids", sanitizeOpenAIResponsesInputItemIDs},
+		{"input_ids", func(body []byte) ([]byte, bool, error) {
+			return sanitizeOpenAIResponsesInputItemIDs(body, false)
+		}},
 		{"reasoning_replay", normalizeOpenAIResponsesReasoningContentReplay},
 		{"api_key_store_false", func(body []byte) ([]byte, bool, error) {
 			return normalizeOpenAIAPIKeyStoreFalseReasoningReplay(body, false)

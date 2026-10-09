@@ -44,7 +44,7 @@ func TestOpenAIResponsesInputItemIDPrefixUsesObservedOutputContracts(t *testing.
 	}
 	for _, tt := range tests {
 		t.Run(tt.itemType+"/"+tt.id, func(t *testing.T) {
-			require.Equal(t, tt.strip, shouldStripOpenAIResponsesInputItemID(tt.itemType, tt.id))
+			require.Equal(t, tt.strip, shouldStripOpenAIResponsesInputItemID(tt.itemType, tt.id, false))
 		})
 	}
 }
@@ -60,7 +60,7 @@ func TestSanitizeOpenAIResponsesInputItemIDsDoesNotCascadeAcrossIDNamespaces(t *
 		{"type":"custom_tool_call_output","id":"ctco_bad_output","call_id":"ctco_bad_output","output":"preserve by call_id"}
 	]}`)
 
-	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body)
+	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body, false)
 
 	require.NoError(t, err)
 	require.True(t, changed)
@@ -80,7 +80,7 @@ func TestSanitizeOpenAIResponsesInputItemIDsDoesNotCascadeAcrossIDNamespaces(t *
 func TestSanitizeOpenAIResponsesInputItemIDsLeavesUnrelatedReferencesUntouched(t *testing.T) {
 	body := []byte(`{"previous_response_id":"resp_1","input":[{"type":"item_reference","id":"remote_item"}]}`)
 
-	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body)
+	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body, false)
 
 	require.NoError(t, err)
 	require.False(t, changed)
@@ -90,7 +90,7 @@ func TestSanitizeOpenAIResponsesInputItemIDsLeavesUnrelatedReferencesUntouched(t
 func TestSanitizeOpenAIResponsesInputItemIDsPreservesReferenceToDuplicateRetainedID(t *testing.T) {
 	body := []byte(`{"input":[{"type":"function_call","id":"ctc_shared","call_id":"call_1"},{"type":"custom_tool_call","id":"ctc_shared","call_id":"call_2"},{"type":"item_reference","id":"ctc_shared"}]}`)
 
-	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body)
+	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body, false)
 
 	require.NoError(t, err)
 	require.True(t, changed)
@@ -108,7 +108,7 @@ func TestSanitizeOpenAIResponsesInputItemIDsPreservesOpaqueOutputsAndReferences(
 		{"type":"item_reference","id":"kept_output"}
 	]}`)
 
-	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body)
+	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body, false)
 
 	require.NoError(t, err)
 	require.True(t, changed)
@@ -119,7 +119,7 @@ func TestSanitizeOpenAIResponsesInputItemIDsPreservesOpaqueOutputsAndReferences(
 	require.Equal(t, "kept_output", gjson.GetBytes(sanitized, "input.3.id").String())
 	require.Equal(t, "kept_output", gjson.GetBytes(sanitized, "input.4.id").String())
 
-	second, changedAgain, err := sanitizeOpenAIResponsesInputItemIDs(sanitized)
+	second, changedAgain, err := sanitizeOpenAIResponsesInputItemIDs(sanitized, false)
 	require.NoError(t, err)
 	require.False(t, changedAgain)
 	require.Equal(t, sanitized, second)
@@ -128,7 +128,7 @@ func TestSanitizeOpenAIResponsesInputItemIDsPreservesOpaqueOutputsAndReferences(
 func TestSanitizeOpenAIResponsesInputItemIDsStripsEmptyKnownIDsOnly(t *testing.T) {
 	body := []byte(`{"input":[{"type":"message","id":"","content":"hello"},{"type":"future_item","id":""}]}`)
 
-	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body)
+	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body, false)
 
 	require.NoError(t, err)
 	require.True(t, changed)
@@ -141,7 +141,7 @@ func TestSanitizeOpenAIResponsesInputItemIDsStripsOversizedWebSearchID(t *testin
 	oversizedID := "ws_" + strings.Repeat("x", 62)
 	body := []byte(`{"input":[{"type":"web_search_call","id":"` + validID + `"},{"type":"web_search_call","id":"` + oversizedID + `"}]}`)
 
-	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body)
+	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body, false)
 
 	require.NoError(t, err)
 	require.True(t, changed)
@@ -163,7 +163,7 @@ func TestSanitizeOpenAIResponsesInputItemIDsStripsOnlyNonPairCallIDs(t *testing.
 		{"type":"local_shell_call","call_id":"keep_shell","name":"shell","arguments":"{}"}
 	]}`)
 
-	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body)
+	sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body, false)
 	require.NoError(t, err)
 	require.True(t, changed)
 	for i := 0; i < 3; i++ {

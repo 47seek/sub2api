@@ -27,12 +27,13 @@ import (
 
 // openaiStreamingResult streaming response result
 type openaiStreamingResult struct {
-	usage            *OpenAIUsage
-	firstTokenMs     *int
-	responseID       string
-	imageCount       int
-	imageOutputSizes []string
-	searchCount      int
+	usage                   *OpenAIUsage
+	firstTokenMs            *int
+	responseID              string
+	imageCount              int
+	imageOutputSizes        []string
+	searchCount             int
+	invalidEncryptedContent *openAIInvalidEncryptedContentSignal
 }
 
 type openaiNonStreamingResult struct {
@@ -349,14 +350,16 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	// Dedup search tool calls across SSE events (item.done + response.completed
 	// both list the same call_id — counting both would ~2× the surcharge).
 	streamSearchSeen := make(map[string]struct{})
+	var invalidEncryptedContent *openAIInvalidEncryptedContentSignal
 	resultWithUsage := func() *openaiStreamingResult {
 		return &openaiStreamingResult{
-			usage:            usage,
-			firstTokenMs:     firstTokenMs,
-			responseID:       responseID,
-			imageCount:       imageCounter.Count(),
-			imageOutputSizes: imageCounter.Sizes(),
-			searchCount:      searchCounter,
+			usage:                   usage,
+			firstTokenMs:            firstTokenMs,
+			responseID:              responseID,
+			imageCount:              imageCounter.Count(),
+			imageOutputSizes:        imageCounter.Sizes(),
+			searchCount:             searchCounter,
+			invalidEncryptedContent: invalidEncryptedContent,
 		}
 	}
 	flushPending := func(disconnectMessage string) {
@@ -372,6 +375,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		lastDownstreamWriteAt = time.Now()
 	}
 	finalizeStream := func() (*openaiStreamingResult, error) {
+		if invalidEncryptedContent != nil && sawFailedEvent && !openAIStreamClientOutputStarted(c, clientOutputStarted) {
+			return resultWithUsage(), invalidEncryptedContent
+		}
 		if stageFirstOutput && eventInProgress {
 			// EOF dispatches the final SSE event even without a trailing blank line.
 			completeGuardedEvent(true)
@@ -497,6 +503,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				bareErrorPayload = nil
 				bareErrorAccountSideEffectsPending = false
 				failedMessage = ""
+				invalidEncryptedContent = nil
 			}
 			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
 				suppressCurrentEvent = true
@@ -550,7 +557,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					})
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
-				if !outputStarted && !cyberHit {
+				if signal := newOpenAIInvalidEncryptedContentSignal(account, dataBytes, failedMessage); signal != nil {
+					invalidEncryptedContent = signal
+					if !outputStarted && !(codexFailureTerminal && eventType == "error") {
+						sawFailedEvent = true
+						streamEarlyErr = signal
+						return
+					}
+				}
+				if !outputStarted && !cyberHit && invalidEncryptedContent == nil {
 					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
 						sawFailedEvent = true
 						streamEarlyErr = compactErr
@@ -573,7 +588,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 						s.recordOpenAIStreamUpstreamError(c, account, false, upstreamRequestID, "stream_failed", dataBytes, failedMessage)
 					}
 				}
-				if !outputStarted {
+				if !outputStarted && invalidEncryptedContent == nil {
 					shouldFailover := false
 					if !cyberHit {
 						if eventType == "error" {
@@ -1721,6 +1736,9 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		msg := extractOpenAISSEErrorMessage(terminalPayload)
 		if msg == "" {
 			msg = "Upstream compact response failed"
+		}
+		if signal := newOpenAIInvalidEncryptedContentSignal(account, terminalPayload, msg); signal != nil {
+			return nil, signal
 		}
 		if compactErr := newOpenAICompactFallbackSignal(c, terminalPayload, msg); compactErr != nil {
 			return nil, compactErr

@@ -444,7 +444,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		// 在各 handler 的写头点强制放行，铸造账号在此统一记录，供出站守卫剥离
 		// failover 换号后的跨账号回带（openai_codex_turn_state.go）。
 		if extractOpenAICodexTurnState(resp.Header) != "" {
-			s.noteOpenAICodexTurnStateProvenance(c, account)
+			s.noteOpenAICodexTurnStateProvenance(c, account, extractOpenAICodexTurnState(resp.Header))
 		}
 
 		if reqStream {
@@ -460,7 +460,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 				}
 				if signal, ok := asOpenAICompactFallbackSignal(handleErr); ok {
 					_ = resp.Body.Close()
-					compactResp, compactBody := openAICompactFallbackErrorResponse(resp, signal)
+					compactResp, compactBody := openAIStreamErrorResponse(resp, signal.payload)
 					if shouldFailoverOpenAIPassthroughResponse(account, compactResp.StatusCode, compactBody) {
 						return nil, s.handleFailoverErrorResponsePassthrough(ctx, compactResp, c, account, body, compactBody)
 					}
@@ -487,7 +487,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 				}
 				if signal, ok := asOpenAICompactFallbackSignal(handleErr); ok {
 					_ = resp.Body.Close()
-					compactResp, compactBody := openAICompactFallbackErrorResponse(resp, signal)
+					compactResp, compactBody := openAIStreamErrorResponse(resp, signal.payload)
 					if shouldFailoverOpenAIPassthroughResponse(account, compactResp.StatusCode, compactBody) {
 						return nil, s.handleFailoverErrorResponsePassthrough(ctx, compactResp, c, account, body, compactBody)
 					}

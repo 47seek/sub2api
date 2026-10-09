@@ -227,7 +227,7 @@ func TestShouldStripOpenAIResponsesInputItemID_Reasoning(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, shouldStripOpenAIResponsesInputItemID(tc.itemType, tc.id))
+			require.Equal(t, tc.want, shouldStripOpenAIResponsesInputItemID(tc.itemType, tc.id, false))
 		})
 	}
 }
@@ -244,7 +244,7 @@ func TestSanitizeOpenAIResponsesInputItemIDs_AllocationGrowthIsLinear(t *testing
 		runtime.GC()
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
-		sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body)
+		sanitized, changed, err := sanitizeOpenAIResponsesInputItemIDs(body, false)
 		runtime.ReadMemStats(&after)
 		require.NoError(t, err)
 		require.True(t, changed)
