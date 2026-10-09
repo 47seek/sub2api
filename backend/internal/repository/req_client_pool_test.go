@@ -110,11 +110,11 @@ func TestGetSharedReqClient_ProxyURLMissingHost(t *testing.T) {
 	require.Contains(t, err.Error(), "proxy URL missing host")
 }
 
-func TestCreateOpenAIReqClient_Timeout120Seconds(t *testing.T) {
-	sharedReqClients = sync.Map{}
-	client, err := createOpenAIReqClient("http://proxy.local:8080")
+func TestOpenAIPrivacyClientFactory_Timeout120Seconds(t *testing.T) {
+	client, err := NewOpenAIPrivacyClientFactory(NewHTTPUpstream(nil))("http://proxy.local:8080")
 	require.NoError(t, err)
 	require.Equal(t, 120*time.Second, client.GetClient().Timeout)
+	require.Nil(t, client.GetClient().Jar)
 }
 
 func TestCreateGeminiReqClient_ForceHTTP2Disabled(t *testing.T) {

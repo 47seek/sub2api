@@ -6,25 +6,24 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/service"
-	"github.com/imroc/req/v3"
 )
 
 // NewOpenAIOAuthClient creates a new OpenAI OAuth client
-func NewOpenAIOAuthClient() service.OpenAIOAuthClient {
-	return &openaiOAuthService{tokenURL: openai.TokenURL}
+func NewOpenAIOAuthClient(factory service.PrivacyClientFactory) service.OpenAIOAuthClient {
+	return &openaiOAuthService{tokenURL: openai.TokenURL, clientFactory: factory}
 }
 
 type openaiOAuthService struct {
-	tokenURL string
+	tokenURL      string
+	clientFactory service.PrivacyClientFactory
 }
 
 func (s *openaiOAuthService) ExchangeCode(ctx context.Context, code, codeVerifier, redirectURI, proxyURL, clientID string) (*openai.TokenResponse, error) {
-	client, err := createOpenAIReqClient(proxyURL)
+	client, err := s.clientFactory(proxyURL)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_CLIENT_INIT_FAILED", "create HTTP client: %v", err)
 	}
@@ -83,7 +82,7 @@ func (s *openaiOAuthService) RefreshTokenWithClientID(ctx context.Context, refre
 }
 
 func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refreshToken, proxyURL, clientID string) (*openai.TokenResponse, error) {
-	client, err := createOpenAIReqClient(proxyURL)
+	client, err := s.clientFactory(proxyURL)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_OAUTH_CLIENT_INIT_FAILED", "create HTTP client: %v", err)
 	}
@@ -117,13 +116,6 @@ func (s *openaiOAuthService) refreshTokenWithClientID(ctx context.Context, refre
 	}
 
 	return &tokenResp, nil
-}
-
-func createOpenAIReqClient(proxyURL string) (*req.Client, error) {
-	return getSharedReqClient(reqClientOptions{
-		ProxyURL: proxyURL,
-		Timeout:  120 * time.Second,
-	})
 }
 
 func shouldReturnOpenAINoProxyHint(ctx context.Context, proxyURL string, err error) bool {

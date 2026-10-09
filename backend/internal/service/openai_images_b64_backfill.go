@@ -123,7 +123,12 @@ func (s *OpenAIGatewayService) fetchOpenAIImageURLBase64(ctx context.Context, ac
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	var resp *http.Response
+	if account.IsOpenAIOAuthLike() && account.GetCodexFingerprintMode() == codexFingerprintDevice && !s.isAgentIdentityAccount(ctx, account) {
+		resp, err = doOpenAIDeviceUpstream(s.httpUpstream, req, proxyURL, account)
+	} else {
+		resp, err = s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	}
 	if err != nil {
 		return "", fmt.Errorf("download image: %w", err)
 	}

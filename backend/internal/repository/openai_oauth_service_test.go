@@ -37,7 +37,7 @@ func (s *OpenAIOAuthServiceSuite) TearDownTest() {
 
 func (s *OpenAIOAuthServiceSuite) setupServer(handler http.HandlerFunc) {
 	s.srv = newLocalTestServer(s.T(), handler)
-	s.svc = &openaiOAuthService{tokenURL: s.srv.URL}
+	s.svc = &openaiOAuthService{tokenURL: s.srv.URL, clientFactory: NewOpenAIPrivacyClientFactory(NewHTTPUpstream(nil))}
 }
 
 func (s *OpenAIOAuthServiceSuite) TestExchangeCode_DefaultRedirectURI() {
@@ -350,7 +350,7 @@ func (s *OpenAIOAuthServiceSuite) TestRefreshToken_NonSuccessStatus() {
 }
 
 func TestNewOpenAIOAuthClient_DefaultTokenURL(t *testing.T) {
-	client := NewOpenAIOAuthClient()
+	client := NewOpenAIOAuthClient(NewOpenAIPrivacyClientFactory(NewHTTPUpstream(nil)))
 	svc, ok := client.(*openaiOAuthService)
 	require.True(t, ok)
 	require.Equal(t, openai.TokenURL, svc.tokenURL)

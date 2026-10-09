@@ -30,7 +30,7 @@ func (c *openAIReferralClient) request(ctx context.Context, call service.OpenAIR
 		return nil, infraerrors.New(http.StatusBadGateway, "OPENAI_REFERRAL_CLIENT_ERROR", "failed to build referral client")
 	}
 	// Sending has no documented idempotency key. Override any factory retries.
-	return client.R().SetContext(ctx).SetHeaders(call.Headers).SetRetryCount(0), nil
+	return client.R().SetContext(service.WithOpenAIHTTPAccount(ctx, call.LocalAccountID)).SetHeaders(call.Headers).SetRetryCount(0), nil
 }
 
 func (c *openAIReferralClient) QueryEligibility(ctx context.Context, call service.OpenAIReferralCall) (*service.OpenAIReferralEligibility, error) {

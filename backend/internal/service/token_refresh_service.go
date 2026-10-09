@@ -1456,14 +1456,13 @@ func (s *TokenRefreshService) ensureOpenAIPrivacy(ctx context.Context, account *
 		return
 	}
 
-	var proxyURL string
-	if account.ProxyID != nil && s.proxyRepo != nil {
-		if p, err := s.proxyRepo.GetByID(ctx, *account.ProxyID); err == nil && p != nil {
-			proxyURL = p.URL()
-		}
+	proxyURL, err := resolveOpenAIAccountProxy(ctx, account, s.proxyRepo)
+	if err != nil {
+		slog.Warn("token_refresh.openai_privacy_proxy_failed", "account_id", account.ID, "error", err)
+		return
 	}
 
-	mode := disableOpenAITraining(ctx, s.privacyClientFactory, token, proxyURL)
+	mode := disableOpenAITraining(WithOpenAIHTTPAccount(ctx, account.ID), s.privacyClientFactory, token, proxyURL)
 	if mode == "" {
 		return
 	}

@@ -16,6 +16,18 @@ const (
 type httpUpstreamProfileContextKey struct{}
 type httpUpstreamDisableRedirectsContextKey struct{}
 type httpUpstreamPublicHostsOnlyContextKey struct{}
+type openAIHTTPAccountContextKey struct{}
+
+// Auxiliary calls keep their existing signatures while carrying the local
+// device row through refresh and enrichment. Credentials may belong to a parent.
+func WithOpenAIHTTPAccount(ctx context.Context, accountID int64) context.Context {
+	return context.WithValue(ctx, openAIHTTPAccountContextKey{}, accountID)
+}
+
+func OpenAIHTTPAccountID(ctx context.Context) int64 {
+	id, _ := ctx.Value(openAIHTTPAccountContextKey{}).(int64)
+	return id
+}
 
 // WithHTTPUpstreamProfile injects an upstream transport profile into ctx.
 func WithHTTPUpstreamProfile(ctx context.Context, profile HTTPUpstreamProfile) context.Context {

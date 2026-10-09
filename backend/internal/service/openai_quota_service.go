@@ -164,6 +164,7 @@ func NewOpenAIQuotaService(
 // OAuth account. Returns infraerrors so the handler layer can map them to
 // stable error codes / HTTP statuses.
 func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error) {
+	ctx = WithOpenAIHTTPAccount(ctx, accountID)
 	accessToken, chatGPTAccountID, proxyURL, fedRAMP, err := s.prepareUpstreamCall(ctx, accountID)
 	if err != nil {
 		return nil, err
@@ -358,6 +359,7 @@ func (s *OpenAIQuotaService) ResetCreditTargeted(ctx context.Context, accountID 
 }
 
 func (s *OpenAIQuotaService) resetCredit(ctx context.Context, accountID int64, creditID, redeemRequestID string, targeted bool) (*OpenAIQuotaResetResult, error) {
+	ctx = WithOpenAIHTTPAccount(ctx, accountID)
 	// Shadow guard: resetting credits via a shadow account would silently
 	// operate on the parent's quota; that is surprising and unwanted. Callers
 	// must reset the parent account directly.
@@ -460,9 +462,10 @@ func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID 
 		return "", "", "", false, infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_INVALID_TYPE", "account is not an OAuth account")
 	}
 
+	deviceAccount := account
 	// Spark shadow accounts do not hold their own credentials; resolve to the
-	// parent account so that chatgpt_account_id / access_token / proxy all come
-	// from the parent. This must happen BEFORE the chatgpt_account_id check.
+	// parent for chatgpt_account_id and access_token before checking the owner.
+	// The selected local row retains its proxy and device boundary.
 	if account.IsShadow() {
 		resolved, rerr := resolveCredentialAccount(ctx, s.accountRepo, account)
 		if rerr != nil {
@@ -494,20 +497,9 @@ func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID 
 	}
 	fedRAMP = account.IsChatGPTAccountFedRAMP()
 
-	// account.Proxy is eager-loaded by accountRepo.GetByID (see
-	// repository.accountsToService), so we can read the proxy URL directly
-	// instead of round-tripping the DB again. Fall back to proxyRepo only
-	// when Proxy isn't pre-populated (defensive — e.g. callers that built
-	// the Account by hand).
-	if account.ProxyID != nil {
-		switch {
-		case account.Proxy != nil:
-			proxyURL = account.Proxy.URL()
-		case s.proxyRepo != nil:
-			if proxy, perr := s.proxyRepo.GetByID(ctx, *account.ProxyID); perr == nil && proxy != nil {
-				proxyURL = proxy.URL()
-			}
-		}
+	proxyURL, err = resolveOpenAIAccountProxy(ctx, deviceAccount, s.proxyRepo)
+	if err != nil {
+		return "", "", "", false, err
 	}
 
 	return accessToken, chatGPTAccountID, proxyURL, fedRAMP, nil

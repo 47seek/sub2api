@@ -17,7 +17,7 @@ type OpenAIOAuthService struct {
 	sessionStore         *openai.SessionStore
 	proxyRepo            ProxyRepository
 	oauthClient          OpenAIOAuthClient
-	privacyClientFactory PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
+	privacyClientFactory PrivacyClientFactory // 用于调用 chatgpt.com/backend-api。
 }
 
 // NewOpenAIOAuthService creates a new OpenAI OAuth service
@@ -29,7 +29,7 @@ func NewOpenAIOAuthService(proxyRepo ProxyRepository, oauthClient OpenAIOAuthCli
 	}
 }
 
-// SetPrivacyClientFactory 注入 ImpersonateChrome 客户端工厂，
+// SetPrivacyClientFactory 注入账号辅助请求的客户端工厂，
 // 用于调用 chatgpt.com/backend-api 获取账号信息（plan_type 等）。
 func (s *OpenAIOAuthService) SetPrivacyClientFactory(factory PrivacyClientFactory) {
 	s.privacyClientFactory = factory
@@ -344,12 +344,10 @@ func (s *OpenAIOAuthService) RefreshAccountToken(ctx context.Context, account *A
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_OAUTH_INVALID_ACCOUNT_TYPE", "account is not an OAuth account")
 	}
 
-	var proxyURL string
-	if account.ProxyID != nil && s.proxyRepo != nil {
-		proxy, err := s.proxyRepo.GetByID(ctx, *account.ProxyID)
-		if err == nil && proxy != nil {
-			proxyURL = proxy.URL()
-		}
+	ctx = WithOpenAIHTTPAccount(ctx, account.ID)
+	proxyURL, err := resolveOpenAIAccountProxy(ctx, account, s.proxyRepo)
+	if err != nil {
+		return nil, err
 	}
 
 	accessToken := account.GetCredential("access_token")

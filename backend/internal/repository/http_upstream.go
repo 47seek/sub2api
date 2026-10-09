@@ -162,9 +162,10 @@ type openAIHTTP2FallbackState struct {
 // 7. 代理变更时清空旧连接池，避免复用错误代理
 // 8. 账号并发数与连接池上限对应（账号隔离策略下）
 type httpUpstreamService struct {
-	cfg     *config.Config                  // 全局配置
-	mu      sync.RWMutex                    // 保护 clients map 的读写锁
-	clients map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
+	cfg        *config.Config                  // 全局配置
+	mu         sync.RWMutex                    // 保护 clients map 的读写锁
+	clients    map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
+	openAIJars map[int64]http.CookieJar        // Device state survives transport eviction.
 	// OpenAI 走 HTTP/HTTPS 代理时的 H2->H1 回退状态（key=标准化 proxyKey）
 	openAIHTTP2Fallbacks sync.Map
 }
@@ -555,6 +556,9 @@ func (s *httpUpstreamService) acquireClientWithTLS(proxyURL string, accountID in
 // TLS 指纹客户端使用独立的缓存键，与普通客户端隔离
 func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
 	isolation := s.getIsolationMode()
+	if upstreamProfile == service.HTTPUpstreamProfileOpenAI {
+		isolation = config.ConnectionPoolIsolationAccountProxy
+	}
 	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
 	if err != nil {
 		return nil, err
@@ -562,8 +566,8 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	settings := s.resolvePoolSettings(isolation, accountConcurrency)
 	settings = s.applyProfilePoolSettings(settings, upstreamProfile)
 	// TLS 指纹客户端使用独立的缓存键，加 "tls:" 前缀
-	cacheKey := "tls:" + buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault)
-	poolKey := buildPoolKey(settings, upstreamProtocolModeDefault) + ":tls"
+	cacheKey := "tls:" + string(upstreamProfile) + ":" + profile.Name + ":" + buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault)
+	poolKey := buildPoolKey(settings, upstreamProtocolModeDefault) + ":tls:" + profile.Name
 
 	now := time.Now()
 	nowUnix := now.UnixNano()
@@ -621,8 +625,24 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	}
 
 	client := &http.Client{Transport: transport}
+	if upstreamProfile == service.HTTPUpstreamProfileOpenAI {
+		transport.DisableCompression = true
+		client.Jar, err = s.openAIJarLocked(accountID)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+	}
 	if s.shouldValidateResolvedIP() {
 		client.CheckRedirect = s.redirectChecker
+	}
+	if profile == tlsfingerprint.Codex0162 {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if req.URL.Scheme != "https" {
+				return errors.New("Codex TLS profile does not allow an HTTPS redirect to plaintext HTTP")
+			}
+			return s.redirectChecker(req, via)
+		}
 	}
 
 	entry := &upstreamClientEntry{
@@ -720,6 +740,9 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	if err != nil {
 		return nil, err
 	}
+	if profile == service.HTTPUpstreamProfileOpenAI {
+		isolation = config.ConnectionPoolIsolationAccountProxy
+	}
 	// 根据请求 profile（例如 OpenAI）选择协议模式
 	protocolMode := s.resolveProtocolMode(profile, proxyKey, parsedProxy)
 	settings := s.resolvePoolSettings(isolation, accountConcurrency)
@@ -776,6 +799,14 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 		return nil, fmt.Errorf("build transport: %w", err)
 	}
 	client := &http.Client{Transport: transport}
+	if profile == service.HTTPUpstreamProfileOpenAI {
+		transport.DisableCompression = true
+		client.Jar, err = s.openAIJarLocked(accountID)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, err
+		}
+	}
 	if s.shouldValidateResolvedIP() {
 		client.CheckRedirect = s.redirectChecker
 	}
@@ -1471,6 +1502,9 @@ func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *u
 			socks5Dialer := tlsfingerprint.NewSOCKS5ProxyDialer(profile, proxyURL)
 			transport.DialTLSContext = socks5Dialer.DialTLSContext
 		case "https":
+			if profile == tlsfingerprint.Codex0162 {
+				return nil, errors.New("Codex device transport does not support HTTPS proxies; TLS fingerprint fallback is disabled")
+			}
 			// The fingerprint dialer emits a plaintext CONNECT preface and cannot
 			// establish TLS to an HTTPS proxy. Keep proxy routing via net/http.
 			return buildUpstreamTransport(settings, proxyURL, upstreamProtocolModeDefault)
@@ -1480,6 +1514,9 @@ func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *u
 			httpDialer := tlsfingerprint.NewHTTPProxyDialer(profile, proxyURL)
 			transport.DialTLSContext = httpDialer.DialTLSContext
 		default:
+			if profile == tlsfingerprint.Codex0162 {
+				return nil, fmt.Errorf("Codex device transport does not support proxy scheme %q; TLS fingerprint fallback is disabled", scheme)
+			}
 			// 未知代理类型，回退到普通代理配置（无 TLS 指纹）
 			slog.Debug("tls_fingerprint_transport_unknown_scheme_fallback", "scheme", scheme)
 			if err := proxyutil.ConfigureTransportProxy(transport, proxyURL); err != nil {

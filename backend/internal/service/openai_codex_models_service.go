@@ -19,8 +19,8 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"golang.org/x/net/http2"
 	"golang.org/x/sync/singleflight"
@@ -1594,6 +1594,7 @@ type openAIModelsRequest struct {
 	credentialAccountID int64
 	credentialAccount   *Account
 	accountConcurrency  int
+	deviceMode          bool
 	useAPIKeyUpstream   bool
 	// Cached bodies have already been converted to their requested format.
 	standardModelsList bool
@@ -1693,7 +1694,7 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 	}
 
 	clientVersion = strings.TrimSpace(clientVersion)
-	if clientVersion == "" {
+	if clientVersion == "" || account.GetCodexFingerprintMode() == codexFingerprintDevice {
 		clientVersion = CodexCanonicalClientVersion()
 	}
 
@@ -1751,15 +1752,12 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 	headers.Set("Accept", "application/json")
 	overrideUA := ""
 	if !useAPIKeyUpstream {
-		overrideUA = credAccount.GetOpenAIUserAgent()
+		overrideUA = s.codexIdentityOverrideUA(account)
 	}
 	identity := resolveCodexOutboundIdentity(overrideUA)
 	headers.Set("Originator", identity.originator)
 	headers.Set("User-Agent", identity.userAgent)
-	// Version 头优先与 client_version 查询参数同源：客户端自报版本合法且不低于上游
-	// 门槛时原样使用；否则回退规范版本，避免陈旧 version 触发上游 404（issue #3901）。
-	// client_version 查询参数本身始终按客户端原值透传（内容协商语义，契约见
-	// TestFetchCodexModelsManifestPassthrough）。
+	// Device requests pin both negotiation and headers to the canonical version.
 	headerVersion := NormalizeCodexClientVersion(clientVersion)
 	if headerVersion == "" || CompareVersions(headerVersion, codexUpstreamMinVersion) < 0 {
 		headerVersion = identity.version
@@ -1770,6 +1768,9 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
+	if account.ProxyID != nil && proxyURL == "" {
+		return nil, fmt.Errorf("OpenAI account %d has a bound proxy that was not resolved", account.ID)
+	}
 
 	request := openAIModelsRequest{
 		url:                 requestURL.String(),
@@ -1779,6 +1780,7 @@ func (s *OpenAIGatewayService) FetchCodexModelsManifest(ctx context.Context, acc
 		credentialAccountID: credAccount.ID,
 		credentialAccount:   credAccount,
 		accountConcurrency:  account.Concurrency,
+		deviceMode:          account.GetCodexFingerprintMode() == codexFingerprintDevice && !credAccount.IsOpenAIAgentIdentity(),
 		useAPIKeyUpstream:   useAPIKeyUpstream,
 	}
 	if useAPIKeyUpstream {
@@ -1927,21 +1929,17 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 		}
 		req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
 		resp, err = s.httpUpstream.Do(req, request.proxyURL, request.accountID, request.accountConcurrency)
+	} else if request.deviceMode {
+		req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+		resp, err = s.httpUpstream.DoWithTLS(req, request.proxyURL, request.accountID, request.accountConcurrency, tlsfingerprint.Codex0162)
 	} else {
 		handled := false
 		if s.pluginManager != nil {
 			resp, handled, err = s.pluginManager.RoundTripOpenAIOAuth(reqCtx, req, request.proxyURL, request.credentialAccount)
 		}
 		if !handled {
-			client, clientErr := httpclient.GetClient(httpclient.Options{
-				ProxyURL:              request.proxyURL,
-				Timeout:               codexModelsManifestRequestTimeout,
-				ResponseHeaderTimeout: 10 * time.Second,
-			})
-			if clientErr != nil {
-				return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_PROXY_INVALID", "invalid proxy configuration: %v", clientErr)
-			}
-			resp, err = client.Do(req)
+			req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+			resp, err = s.httpUpstream.Do(req, request.proxyURL, request.accountID, request.accountConcurrency)
 		}
 	}
 	if err != nil {

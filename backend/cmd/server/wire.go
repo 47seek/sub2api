@@ -63,8 +63,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	return nil, nil
 }
 
-func providePrivacyClientFactory() service.PrivacyClientFactory {
-	return repository.CreatePrivacyReqClient
+func providePrivacyClientFactory(upstream service.HTTPUpstream) service.PrivacyClientFactory {
+	return repository.NewOpenAIPrivacyClientFactory(upstream)
 }
 
 func provideServiceBuildInfo(buildInfo handler.BuildInfo) service.BuildInfo {

@@ -147,8 +147,8 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	notificationEmailService := service.NewNotificationEmailService(settingRepository, emailService)
 	balanceNotifyService := service.ProvideBalanceNotifyService(emailService, settingRepository, accountRepository, notificationEmailService)
 	gatewayService := service.NewGatewayService(accountRepository, groupRepository, usageLogRepository, usageBillingRepository, userRepository, userSubscriptionRepository, userGroupRateRepository, gatewayCache, configConfig, schedulerSnapshotService, concurrencyService, billingService, rateLimitService, billingCacheService, identityService, httpUpstream, deferredService, claudeTokenProvider, sessionLimitCache, rpmCache, digestSessionStore, settingService, tlsFingerprintProfileService, channelService, modelPricingResolver, compositeRouteResolver, balanceNotifyService, serviceUserPlatformQuotaRepository)
-	openAIOAuthClient := repository.NewOpenAIOAuthClient()
-	privacyClientFactory := providePrivacyClientFactory()
+	privacyClientFactory := providePrivacyClientFactory(httpUpstream)
+	openAIOAuthClient := repository.NewOpenAIOAuthClient(privacyClientFactory)
 	openAIOAuthService := service.ProvideOpenAIOAuthService(proxyRepository, openAIOAuthClient, privacyClientFactory)
 	openAITokenProvider := service.ProvideOpenAITokenProvider(accountRepository, geminiTokenCache, openAIOAuthService, oAuthRefreshAPI)
 	grokOAuthClient := repository.NewGrokOAuthClient()
@@ -372,8 +372,8 @@ type Application struct {
 	Cleanup       func()
 }
 
-func providePrivacyClientFactory() service.PrivacyClientFactory {
-	return repository.CreatePrivacyReqClient
+func providePrivacyClientFactory(upstream service.HTTPUpstream) service.PrivacyClientFactory {
+	return repository.NewOpenAIPrivacyClientFactory(upstream)
 }
 
 func provideServiceBuildInfo(buildInfo handler.BuildInfo) service.BuildInfo {

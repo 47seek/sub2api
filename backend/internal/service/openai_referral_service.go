@@ -104,7 +104,7 @@ func (s *OpenAIQuotaService) referralCall(ctx context.Context, id int64, program
 	if err != nil {
 		return OpenAIReferralCall{}, infraerrors.New(http.StatusBadGateway, "OPENAI_REFERRAL_AUTH_ERROR", "failed to authenticate referral request")
 	}
-	return OpenAIReferralCall{ProxyURL: proxy, Headers: headers, ProgramID: program}, nil
+	return OpenAIReferralCall{LocalAccountID: id, ProxyURL: proxy, Headers: headers, ProgramID: program}, nil
 }
 
 func (s *OpenAIQuotaService) QueryReferralEligibility(ctx context.Context, id int64) (*OpenAIReferralEligibility, error) {

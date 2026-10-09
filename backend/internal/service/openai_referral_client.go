@@ -5,9 +5,10 @@ import "context"
 // OpenAIReferralCall carries the account's refreshed authentication and proxy
 // settings to the transport adapter. Headers must never be logged or persisted.
 type OpenAIReferralCall struct {
-	ProxyURL  string
-	Headers   map[string]string
-	ProgramID string
+	LocalAccountID int64
+	ProxyURL       string
+	Headers        map[string]string
+	ProgramID      string
 }
 
 // OpenAIReferralClient isolates invitation transport from eligibility policy.
