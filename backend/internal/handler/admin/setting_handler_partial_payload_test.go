@@ -24,6 +24,8 @@ func TestUpdateSettingsPartialPayloadKeepsUnsentKeys(t *testing.T) {
 		service.SettingKeySMTPHost:         "smtp.example.com",
 		service.SettingKeySMTPFrom:         "noreply@example.com",
 		service.SettingKeyTurnstileEnabled: "true",
+		service.SettingKeyMinCodexVersion:  "0.162.0",
+		service.SettingKeyMaxCodexVersion:  "0.200.0",
 	})
 
 	rec := doUpdateSettings(t, h, map[string]any{"risk_control_enabled": true}, nil)
@@ -37,20 +39,36 @@ func TestUpdateSettingsPartialPayloadKeepsUnsentKeys(t *testing.T) {
 	require.Equal(t, "smtp.example.com", repo.values[service.SettingKeySMTPHost])
 	require.Equal(t, "noreply@example.com", repo.values[service.SettingKeySMTPFrom])
 	require.Equal(t, "true", repo.values[service.SettingKeyTurnstileEnabled])
+	require.Equal(t, "0.162.0", repo.values[service.SettingKeyMinCodexVersion])
+	require.Equal(t, "0.200.0", repo.values[service.SettingKeyMaxCodexVersion])
 }
 
 // A full payload keeps whole-document semantics: fields explicitly set to their
 // zero value are still cleared.
 func TestUpdateSettingsFullPayloadStillClearsSentEmptyFields(t *testing.T) {
 	h, repo := newStepUpSwitchTestHandler(t, map[string]string{
-		service.SettingKeySiteName: "Example Gateway",
+		service.SettingKeySiteName:        "Example Gateway",
+		service.SettingKeyMinCodexVersion: "0.162.0",
+		service.SettingKeyMaxCodexVersion: "0.200.0",
 	})
 
-	rec := doUpdateSettings(t, h, map[string]any{"site_name": ""}, nil)
+	rec := doUpdateSettings(t, h, map[string]any{"site_name": "", "min_codex_version": "", "max_codex_version": ""}, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	require.Equal(t, "", repo.values[service.SettingKeySiteName],
 		"an explicitly sent empty value is a deliberate clear, not an omission")
+	require.Empty(t, repo.values[service.SettingKeyMinCodexVersion])
+	require.Empty(t, repo.values[service.SettingKeyMaxCodexVersion])
+}
+
+func TestUpdateSettingsCodexRangeValidatesRetainedMinimum(t *testing.T) {
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{
+		service.SettingKeyMinCodexVersion: "0.162.0",
+	})
+	rec := doUpdateSettings(t, h, map[string]any{"max_codex_version": "0.161.0"}, nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "max_codex_version must be greater than or equal to min_codex_version")
+	require.Equal(t, "0.162.0", repo.values[service.SettingKeyMinCodexVersion])
 }
 
 // smtp_from_email is the one request field whose JSON name differs from its
