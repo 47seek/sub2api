@@ -24,6 +24,9 @@ func TestCodexMinimumVersionBeforeForwarding(t *testing.T) {
 		allowed bool
 	}{
 		{"0.161.0", false},
+		{"0.162.0-alpha.17.1", false},
+		{"0.162.0-alpha.17.2", true},
+		{"0.162.0-alpha.17.2+build.1", false},
 		{"0.162.0-rc.1", false},
 		{"0.162.0", true},
 		{"0.163.0", true},
