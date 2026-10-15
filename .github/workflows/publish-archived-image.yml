@@ -1,0 +1,28 @@
+name: Publish archived Codex image
+
+on:
+  push:
+    branches: [publish/codex-alpha17.2-image]
+    paths: [.github/workflows/publish-archived-image.yml]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Load verified image archive
+        run: |
+          curl -fL -o image.tar.gz https://github.com/47seek/sub2api/releases/download/image-backup-0.2.15-codex-alpha17.2-fix-linux-amd64/sub2api-0.2.15-codex-alpha17.2-fix-linux-amd64.tar.gz
+          echo 'ff049c933cb40b5bb5195f26a4dd03e04c80f264724c4d7000bc9de78d41ac85  image.tar.gz' | sha256sum -c -
+          docker load -i image.tar.gz
+          test "$(docker image inspect sub2api:0.2.15-codex-alpha17.2-fix --format '{{.Id}}')" = sha256:2430e45e14e20bc99f9c91f501c5bdf861b62c19110465d0f049770e3082e164
+      - name: Publish image
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u 47seek --password-stdin
+          docker tag sub2api:0.2.15-codex-alpha17.2-fix ghcr.io/47seek/sub2api:0.2.15-codex-alpha17.2-fix
+          docker push ghcr.io/47seek/sub2api:0.2.15-codex-alpha17.2-fix
