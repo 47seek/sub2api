@@ -1,12 +1,40 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+func oauthInputMetadataHistory(items, textBytes int) []byte {
+	var body strings.Builder
+	_, _ = body.WriteString(`{"model":"gpt-5.5","opaque":9007199254740993,"input":[`)
+	text := strings.Repeat("x", textBytes)
+	for i := 0; i < items; i++ {
+		if i > 0 {
+			_ = body.WriteByte(',')
+		}
+		_, _ = body.WriteString(`{"role":"user","content":"`)
+		_, _ = body.WriteString(text)
+		_, _ = body.WriteString(`"}`)
+	}
+	_, _ = body.WriteString(`],"tail":{"keep":true}}`)
+	return []byte(body.String())
+}
+
+func TestOAuthInputInternalMetadataUnchangedHistory(t *testing.T) {
+	body := oauthInputMetadataHistory(128, 16<<10)
+	original := bytes.Clone(body)
+	out, changed, err := normalizeOpenAIOAuthResponsesCompatibilityBody(body)
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.Equal(t, original, out)
+	require.Same(t, &body[0], &out[0], "unchanged history should retain the caller's buffer")
+}
 
 func TestOAuthInputInternalMetadata(t *testing.T) {
 	const field = "internal_chat_message_metadata_passthrough"
